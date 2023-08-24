@@ -110,6 +110,9 @@ builder_stamp:
 	docker build -t fc-image-builder:$(DOCKER_IMAGE_TAG) -f Dockerfile.debian-image .
 	touch $@
 
+DOCKER_PROXY_ENV=$(if $(https_proxy),--env https_proxy=$(https_proxy)) \
+	$(if $(http_proxy),--env http_proxy=$(http_proxy)) \
+	$(if $(no_proxy),--env no_proxy=$(no_proxy))
 # For any given target, append "-in-docker" to it to run the build
 # recipe in a container, e.g. instead of:
 # $ make rootfs.img
@@ -123,6 +126,7 @@ builder_stamp:
 		--cap-add=sys_admin \
 		--cap-add=sys_chroot \
 		--env=DEBMIRROR \
+		$(DOCKER_PROXY_ENV) \
 		fc-image-builder:$(DOCKER_IMAGE_TAG) $(subst -in-docker,,$@)
 
 clean:

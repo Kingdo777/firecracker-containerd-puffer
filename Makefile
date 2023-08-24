@@ -80,6 +80,9 @@ all: $(SUBDIRS) $(GOMOD) $(GOSUM) cni-bins test-cni-bins
 $(SUBDIRS):
 	$(MAKE) -C $@ EXTRAGOARGS=$(EXTRAGOARGS)
 
+DOCKER_PROXY_ENV=$(if $(https_proxy),--env https_proxy=$(https_proxy)) \
+	$(if $(http_proxy),--env http_proxy=$(http_proxy)) \
+	$(if $(no_proxy),--env no_proxy=$(no_proxy))
 %-in-docker:
 	docker run --rm \
 		--user $(UID):$(GID) \
@@ -90,6 +93,7 @@ $(SUBDIRS):
 		--env GO111MODULES=on \
 		--env STATIC_AGENT=on \
 		--env GOPROXY=$(shell go env GOPROXY) \
+		$(DOCKER_PROXY_ENV) \
 		--workdir /src \
 		$(FIRECRACKER_CONTAINERD_BUILDER_IMAGE) \
 		$(MAKE) $(subst -in-docker,,$@)
