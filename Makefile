@@ -346,7 +346,6 @@ $(FIRECRACKER_DIR)/Cargo.toml:
 
 $(FIRECRACKER_BIN): $(FIRECRACKER_DIR)/Cargo.toml
 	$(FIRECRACKER_DIR)/tools/devtool -y build --release && \
-		$(FIRECRACKER_DIR)/tools/devtool -y strip
 	cp $(FIRECRACKER_DIR)/build/cargo_target/$(FIRECRACKER_TARGET)/release/firecracker $@
 
 .PHONY: firecracker-clean
