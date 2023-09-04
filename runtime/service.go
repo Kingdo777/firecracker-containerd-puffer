@@ -674,7 +674,7 @@ func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMReques
 	ctx, cancel := context.WithTimeout(requestCtx, timeout)
 	defer cancel()
 
-	if err = s.terminate(ctx); err != nil {
+	if err = s.forceTerminate(ctx); err != nil {
 		return nil, err
 	}
 	s.logger.Info("successfully stop the VM")
