@@ -77,10 +77,10 @@ const (
 	// Firecracker's API server. The channel is closed once the VM starts.
 	vmReadyTimeout = 5 * time.Second
 
-	defaultCreateVMTimeout     = 20 * time.Second
-	defaultStopVMTimeout       = 5 * time.Second
-	defaultShutdownTimeout     = 5 * time.Second
-	defaultVSockConnectTimeout = 5 * time.Second
+	defaultCreateVMTimeout     = 5 * time.Minute
+	defaultStopVMTimeout       = 5 * time.Minute
+	defaultShutdownTimeout     = 5 * time.Minute
+	defaultVSockConnectTimeout = 30 * time.Second
 
 	// StartEventName is the topic published to when a VM starts
 	StartEventName = "/firecracker-vm/start"
@@ -190,7 +190,7 @@ func NewService(shimCtx context.Context, id string, remotePublisher shim.Publish
 	vmID := os.Getenv(internal.VMIDEnvVarKey)
 	logger := log.G(shimCtx)
 	if vmID != "" {
-		logger = logger.WithField("vmID", vmID)
+		logger = logger.WithField("who", "runtime/service").WithField("vmID", vmID)
 
 		shimDir, err = vm.ShimDir(cfg.ShimBaseDir, namespace, vmID)
 		if err != nil {
@@ -587,6 +587,20 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 		opts = append(opts, balloonOpts...)
 	}
 
+	if request.SnapshotCfg == nil {
+		s.logger.Debug("Without snapshot, creating VM form scratch")
+	} else {
+		if request.SnapshotCfg.MemFilePath == "" || request.SnapshotCfg.SnapshotPath == "" {
+			return errors.New("invalid snapshot configuration: one of the snapshot loading parameters was not provided")
+		}
+		snapshotOpts, err := s.buildSnapshotOpt(request.SnapshotCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create snapshot options: %w", err)
+		}
+		s.logger.Debug("creating VM form snapshot, memoryPath:", request.SnapshotCfg.MemFilePath)
+		opts = append(opts, snapshotOpts...)
+	}
+
 	opts = append(opts, jailedOpts...)
 
 	// In the event that a noop jailer is used, we will pass in the shim context
@@ -602,6 +616,12 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 		return fmt.Errorf("failed to start the VM: %w", err)
 	}
 
+	if request.SnapshotCfg != nil && request.SnapshotCfg.ResumeVM == false {
+		if err = s.machine.ResumeVM(s.shimCtx); err != nil {
+			return fmt.Errorf("failed to start the VM: %w", err)
+		}
+	}
+
 	s.logger.Info("calling agent")
 	conn, err := vsock.DialContext(requestCtx, relVSockPath, defaultVsockPort, vsock.WithLogger(s.logger))
 	if err != nil {
@@ -615,12 +635,16 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 	s.ioProxyClient = ioproxy.NewIOProxyClient(rpcClient)
 	s.exitAfterAllTasksDeleted = request.ExitAfterAllTasksDeleted
 
-	err = s.mountDrives(requestCtx)
-	if err != nil {
-		return err
+	if request.SnapshotCfg == nil {
+		err = s.mountDrives(requestCtx)
+		if err != nil {
+			return err
+		}
+		s.logger.Info("successfully started the VM from scratch")
+	} else {
+		s.logger.Info("successfully started the VM from snapshot")
 	}
 
-	s.logger.Info("successfully started the VM")
 	return nil
 }
 
@@ -653,6 +677,7 @@ func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMReques
 	if err = s.terminate(ctx); err != nil {
 		return nil, err
 	}
+	s.logger.Info("successfully stop the VM")
 	return &types.Empty{}, nil
 }
 
@@ -812,6 +837,30 @@ func (s *service) buildBalloonDeviceOpt(balloon models.Balloon) ([]firecracker.O
 	return opt, nil
 }
 
+func WithEnableDiffSnapshots(enableDiff bool) firecracker.WithSnapshotOpt {
+	return func(snapCfg *firecracker.SnapshotConfig) {
+		snapCfg.EnableDiffSnapshots = enableDiff
+	}
+}
+
+func WithResumeVM(resume bool) firecracker.WithSnapshotOpt {
+	return func(snapCfg *firecracker.SnapshotConfig) {
+		snapCfg.ResumeVM = resume
+	}
+}
+
+// buildSnapshotOpt
+func (s *service) buildSnapshotOpt(snapshotCfg *proto.FirecrackerSnapshotConfiguration) ([]firecracker.Opt, error) {
+	opt := []firecracker.Opt{
+		firecracker.WithSnapshot(
+			snapshotCfg.MemFilePath,
+			snapshotCfg.SnapshotPath,
+			WithEnableDiffSnapshots(snapshotCfg.EnableDiffSnapshots),
+			WithResumeVM(snapshotCfg.ResumeVM)),
+	}
+	return opt, nil
+}
+
 // GetBalloonConfig will get configuration for an existing balloon device, before or after machine startup
 func (s *service) GetBalloonConfig(requestCtx context.Context, req *proto.GetBalloonConfigRequest) (*proto.GetBalloonConfigResponse, error) {
 	defer logPanicAndDie(s.logger)
@@ -922,6 +971,24 @@ func (s *service) UpdateBalloonStats(requestCtx context.Context, req *proto.Upda
 	return &types.Empty{}, nil
 }
 
+// CreateSnapshot Creates a snapshot of a VM
+func (s *service) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotRequest) (*types.Empty, error) {
+	defer logPanicAndDie(s.logger)
+
+	err := s.waitVMReady()
+	if err != nil {
+		s.logger.WithError(err).Error()
+		return nil, err
+	}
+
+	if err := s.machine.CreateSnapshot(ctx, req.GetMemFilePath(), req.GetSnapshotFilePath()); err != nil {
+		s.logger.WithError(err).Error()
+		return nil, err
+	}
+
+	return &types.Empty{}, nil
+}
+
 func (s *service) buildVMConfiguration(req *proto.CreateVMRequest) (*firecracker.Config, error) {
 	for _, driveMount := range req.DriveMounts {
 		// Verify the request specified an absolute path for the source/dest of drives.
@@ -1020,10 +1087,12 @@ func (s *service) buildVMConfiguration(req *proto.CreateVMRequest) (*firecracker
 		return nil, fmt.Errorf("failed to create container stub drives: %w", err)
 	}
 
-	s.driveMountStubs, err = CreateDriveMountStubs(
-		&cfg, s.jailer, req.DriveMounts, s.logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create drive mount stub drives: %w", err)
+	if req.SnapshotCfg == nil {
+		s.driveMountStubs, err = CreateDriveMountStubs(
+			&cfg, s.jailer, req.DriveMounts, s.logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create drive mount stub drives: %w", err)
+		}
 	}
 
 	// If no value for NetworkInterfaces was specified (not even an empty but non-nil list) and
@@ -1637,8 +1706,9 @@ func (s *service) forceTerminate(ctx context.Context) error {
 	if err != nil {
 		s.logger.WithError(err).Error("failed to cleanup")
 	}
-
-	return status.Errorf(codes.Internal, "forcefully terminated VM %s", s.vmID)
+	//
+	s.logger.Warning(fmt.Sprintf("forcefully terminated VM %s", s.vmID))
+	return nil
 }
 
 func (s *service) terminate(ctx context.Context) (retErr error) {

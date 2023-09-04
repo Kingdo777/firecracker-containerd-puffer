@@ -83,7 +83,7 @@ func newLocal(ic *plugin.InitContext) (*local, error) {
 
 	return &local{
 		containerdAddress: ic.Address,
-		logger:            log.G(ic.Context),
+		logger:            log.G(ic.Context).WithField("who", "firecracker-control/local"),
 		config:            cfg,
 		processes:         make(map[string]int32),
 	}, nil
@@ -97,14 +97,14 @@ func (s *local) CreateVM(requestCtx context.Context, req *proto.CreateVMRequest)
 
 	id := req.GetVMID()
 	if err := identifiers.Validate(id); err != nil {
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("Validate VMID, kingdo see see")
 		return nil, err
 	}
 
 	ns, err := namespaces.NamespaceRequired(requestCtx)
 	if err != nil {
 		err = fmt.Errorf("error retrieving namespace of request: %w", err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
@@ -116,7 +116,7 @@ func (s *local) CreateVM(requestCtx context.Context, req *proto.CreateVMRequest)
 	shimSocketAddress, err := shim.SocketAddress(requestCtx, s.containerdAddress, id)
 	if err != nil {
 		err = fmt.Errorf("failed to obtain shim socket address: %w", err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
@@ -125,27 +125,28 @@ func (s *local) CreateVM(requestCtx context.Context, req *proto.CreateVMRequest)
 		return nil, status.Errorf(codes.AlreadyExists, "VM with ID %q already exists (socket: %q)", id, shimSocketAddress)
 	} else if err != nil {
 		err = fmt.Errorf("failed to open shim socket at address %q: %w", shimSocketAddress, err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
 	// If we're here, there is no pre-existing shim for this VMID, so we spawn a new one
 	if err := os.Mkdir(s.config.ShimBaseDir, 0700); err != nil && !os.IsExist(err) {
-		s.logger.WithError(err).Error()
-		return nil, fmt.Errorf("failed to make shim base directory: %s: %w", s.config.ShimBaseDir, err)
+		err = fmt.Errorf("failed to make shim base directory: %s: %w", s.config.ShimBaseDir, err)
+		s.logger.WithError(err).Error("kingdo see see")
+		return nil, err
 	}
 
 	shimDir, err := vm.ShimDir(s.config.ShimBaseDir, ns, id)
 	if err != nil {
 		err = fmt.Errorf("failed to build shim path: %w", err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
 	err = shimDir.Mkdir()
 	if err != nil {
 		err = fmt.Errorf("failed to create VM dir %q: %w", shimDir.RootPath(), err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
@@ -165,19 +166,20 @@ func (s *local) CreateVM(requestCtx context.Context, req *proto.CreateVMRequest)
 	fcSocketAddress, err := fcShim.FCControlSocketAddress(requestCtx, s.containerdAddress, id)
 	if err != nil {
 		err = fmt.Errorf("failed to obtain shim socket address: %w", err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
 	fcSocket, err := shim.NewSocket(fcSocketAddress)
 	if err != nil {
 		err = fmt.Errorf("failed to open fccontrol socket at address %q: %w", fcSocketAddress, err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
 	cmd, err := s.newShim(ns, id, s.containerdAddress, shimSocket, fcSocket)
 	if err != nil {
+		s.logger.WithError(err).Error("newShim, kingdo see see")
 		return nil, err
 	}
 
@@ -190,7 +192,7 @@ func (s *local) CreateVM(requestCtx context.Context, req *proto.CreateVMRequest)
 	client, err := s.shimFirecrackerClient(requestCtx, id)
 	if err != nil {
 		err = fmt.Errorf("failed to create firecracker shim client: %w", err)
-		s.logger.WithError(err).Error()
+		s.logger.WithError(err).Error("kingdo see see")
 		return nil, err
 	}
 
@@ -198,7 +200,7 @@ func (s *local) CreateVM(requestCtx context.Context, req *proto.CreateVMRequest)
 
 	resp, err := client.CreateVM(requestCtx, req)
 	if err != nil {
-		s.logger.WithError(err).Error("shim CreateVM returned error")
+		s.logger.WithError(err).Error("shim CreateVM returned error, kingdo see see")
 		return nil, err
 	}
 
@@ -233,17 +235,24 @@ func (s *local) shimFirecrackerClient(requestCtx context.Context, vmID string) (
 func (s *local) StopVM(requestCtx context.Context, req *proto.StopVMRequest) (*types.Empty, error) {
 	client, err := s.shimFirecrackerClient(requestCtx, req.VMID)
 	if err != nil {
+		s.logger.WithError(err).Error("StopVM, shimFirecrackerClient error, kingdo see see")
 		return nil, err
 	}
 	defer client.Close()
 
 	resp, shimErr := client.StopVM(requestCtx, req)
-	waitErr := s.waitForShimToExit(requestCtx, req.VMID)
-
-	// Assuming the shim is returning containerd's error code, return the error as is if possible.
-	if waitErr == nil {
-		return resp, shimErr
+	if shimErr != nil {
+		s.logger.WithError(shimErr).Error("StopVM, shimErr error, kingdo see see")
 	}
+	waitErr := s.waitForShimToExit(requestCtx, req.VMID)
+	if waitErr != nil {
+		s.logger.WithError(waitErr).Error("StopVM, waitErr error, kingdo see see")
+	}
+	//if shimErr != nil && !errors.Is(shimErr, context.DeadlineExceeded) || waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
+	//	multierr := multierror.Append(shimErr, waitErr).ErrorOrNil()
+	//	return resp, multierr
+	//}
+	//return resp, nil
 	return resp, multierror.Append(shimErr, waitErr).ErrorOrNil()
 }
 
@@ -442,6 +451,25 @@ func (s *local) UpdateBalloonStats(requestCtx context.Context, req *proto.Update
 	if err != nil {
 		err = fmt.Errorf("shim client failed to update balloon interval: %w", err)
 		s.logger.WithError(err).Error()
+		return nil, err
+	}
+
+	return resp, nil
+}
+
+// CreateSnapshot Creates a snapshot of a VM
+func (s *local) CreateSnapshot(ctx context.Context, req *proto.CreateSnapshotRequest) (*types.Empty, error) {
+	client, err := s.shimFirecrackerClient(ctx, req.VMID)
+	if err != nil {
+		s.logger.WithError(err).Error("kingdo see see, CreateSnapshot, client.shimFirecrackerClient")
+		return nil, err
+	}
+
+	defer client.Close()
+
+	resp, err := client.CreateSnapshot(ctx, req)
+	if err != nil {
+		s.logger.WithError(err).Error("kingdo see see, CreateSnapshot, client.CreateSnapshot")
 		return nil, err
 	}
 

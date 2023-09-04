@@ -181,3 +181,10 @@ message FirecrackerBalloonDevice {
     bool DeflateOnOom = 2; // Whether the balloon should deflate when the guest has memory pressure.
     int64 StatsPollingIntervals = 3; // Interval in seconds between refreshing statistics.
 }
+
+message FirecrackerSnapshotConfiguration {
+	string SnapshotPath = 1;
+	string MemFilePath = 2;
+	bool EnableDiffSnapshots = 3;
+	bool ResumeVM = 4;
+}
